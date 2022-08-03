@@ -2,7 +2,9 @@
 pragma solidity 0.8.15;
 
 import "./types/Ownable.sol";
+import "./types/Strings.sol";
 import "./libraries/SafeERC20.sol";
+import "./interfaces/IERC20Metadata.sol";
 import "./interfaces/IBalancerPool.sol";
 import "./interfaces/IBalancerVault.sol";
 import "./interfaces/IWeightedPool.sol";
@@ -90,18 +92,34 @@ contract Router is Ownable {
 
     function _makeLpName(IERC20[] calldata _tokens, uint256[] calldata _weights)
         internal
-        returns (string memory)
+        view
+        returns (string memory text_)
     {
         // todo: make correct
-        return "A";
+        text_ = string.concat(text_, "Tsundoku");
+        for (uint256 i = 1; i < _tokens.length; ++i) {
+            text_ = string.concat(text_, " ");
+            text_ = string.concat(text_, Strings.toString(_weights[i] / 1e18));
+            text_ = string.concat(text_, " ");
+            string memory tokenSymbol = IERC20Metadata(address(_tokens[i]))
+                .symbol();
+            text_ = string.concat(text_, tokenSymbol);
+        }
     }
 
     function _makeLpSymbol(
         IERC20[] calldata _tokens,
         uint256[] calldata _weights
-    ) internal returns (string memory) {
+    ) internal view returns (string memory text_) {
         // todo: make correct
-        return "A";
+        text_ = string.concat(text_, "T");
+        for (uint256 i = 1; i < _tokens.length; ++i) {
+            text_ = string.concat(text_, "-");
+            text_ = string.concat(text_, Strings.toString(_weights[i] / 1e18));
+            string memory tokenSymbol = IERC20Metadata(address(_tokens[i]))
+                .symbol();
+            text_ = string.concat(text_, tokenSymbol);
+        }
     }
 
     function _createPool(IERC20[] calldata _tokens, uint256[] calldata _weights)
