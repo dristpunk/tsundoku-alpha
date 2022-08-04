@@ -35,6 +35,7 @@ contract Router is Ownable {
     }
 
     constructor(
+        // todo: fix access trouble
         IWeightedPoolFactory _poolFactory,
         IBalancerVault _vault,
         uint256 _swapFeePercentage
@@ -44,42 +45,35 @@ contract Router is Ownable {
         vault = _vault;
     }
 
-    function _arrayIsSorted(IERC20[] calldata array)
-        internal
-        pure
-        returns (bool)
-    {
-        if (array.length < 2) {
-            return true;
-        }
-
-        IERC20 previous = array[0];
-        for (uint256 i = 1; i < array.length; ++i) {
-            IERC20 current = array[i];
-            if (previous >= current) return false;
-            previous = current;
-        }
-
-        return true;
+    function addLiquidity(
+        bytes32 _poolId,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts
+    ) external {
+        _addLiquidityToPool(
+            _poolId,
+            _tokens,
+            _amounts,
+            IBalancerVault.JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT
+        );
     }
 
-    function addLiquidity(
+    function createPool(
         IERC20[] calldata _tokens,
         uint256[] calldata _weights,
         uint256[] calldata _amounts
-    ) external {
-        require(_arrayIsSorted(_tokens), "Addresses must be sorted");
+    ) external returns (bytes32 poolId) {
+        poolId = _getPoolId(_tokens, _weights);
+        require(poolId == bytes32(0), "Router::Pool already exists");
 
-        bytes32 poolId = _getPoolId(_tokens, _weights);
+        poolId = _createPool(_tokens, _weights);
 
-        IBalancerVault.JoinKind joinKind = IBalancerVault
-            .JoinKind
-            .EXACT_TOKENS_IN_FOR_BPT_OUT;
-        if (poolId == bytes32(0)) {
-            poolId = _createPool(_tokens, _weights);
-            joinKind = IBalancerVault.JoinKind.INIT;
-        }
-        _addLiquidityToPool(poolId, _tokens, _amounts, joinKind);
+        _addLiquidityToPool(
+            poolId,
+            _tokens,
+            _amounts,
+            IBalancerVault.JoinKind.INIT
+        );
     }
 
     function _getPoolId(IERC20[] calldata _tokens, uint256[] calldata _weights)
@@ -139,6 +133,8 @@ contract Router is Ownable {
         );
 
         poolId_ = IWeightedPool(poolAddress_).getPoolId();
+
+        poolIds[keccak256(abi.encode(_tokens, _weights))] = poolId_;
     }
 
     function _addLiquidityToPool(

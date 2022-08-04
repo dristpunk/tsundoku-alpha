@@ -5,31 +5,37 @@ import "./types/Ownable.sol";
 import "./libraries/SafeERC20.sol";
 import "./interfaces/IBalancerPool.sol";
 import "./interfaces/IBalancerVault.sol";
+import "./interfaces/IRouter.sol";
 import "./tokens/TsundokuToken.sol";
-import "./Router.sol";
 
 struct UserInfo {
-    uint256 amount; // How many tokens user has provided
+    IERC20[] tokens; // Tokens user has provided
+    mapping(IERC20 => uint256) amounts; // How many tokens user has provided
     uint256 rewardDebt; // reward debt
 }
 
 struct TokenInfo {
     uint256 allocPoint;
+    uint256 lastRewardBlock; // Last block number that DOKU distribution occurs.
     uint256 accDokuPerShare;
-    uint256 lastRewardBlock;
     uint256 amount;
 }
 
 contract Farms is Ownable {
+    // todo: make events
+    // todo: test for user token amount != 0
+
     using SafeERC20 for IERC20;
 
+    // pools ids
+    bytes32[] public poolIds;
     // users info
-    mapping(IERC20 => mapping(address => UserInfo)) public users;
+    mapping(uint256 => mapping(address => UserInfo)) public userInfo;
     // tokens info
-    mapping(IERC20 => TokenInfo) public tokens;
+    mapping(IERC20 => TokenInfo) public tokenInfo;
     // tsundoku reward token
     TsundokuToken doku;
-    // doku reward for 1 block
+    // doku reward per 1 block
     uint256 public dokuPerBlock;
     // sum of all allocPoints of all tokens
     uint256 public totalAllocPoint = 0;
@@ -38,13 +44,13 @@ contract Farms is Ownable {
     // Treasury address
     address public treasury;
     // router contract serves to interact with balancer
-    address public router;
+    IRouter public router;
     // treasury percent from each token reward (1000 = 100%)
     uint256 public treasuryPercent; // 1 decimal
     // allowed tokens to farm
     IERC20[] public tokenWhitelist;
     mapping(IERC20 => bool) public tokenWhitelistMap;
-    // constant for precision computations accDokuPerShare
+    // constant per precision computations accDokuPerShare
     uint256 public constant ACCOUNT_PRECISION = 1e12;
 
     constructor(
@@ -60,12 +66,19 @@ contract Farms is Ownable {
     function initialize(
         TsundokuToken _doku,
         address _treasury,
-        address _router
+        IRouter _router
     ) external onlyOwner {
-        require(address(doku) == address(0), "Doku address already set");
+        require(
+            address(doku) == address(0),
+            "Farms::Doku address is already set"
+        );
         require(
             address(treasury) == address(0),
-            "Treasury address already set"
+            "Farms::Treasury address is already set"
+        );
+        require(
+            address(router) == address(0),
+            "Farms::Router address is already set"
         );
         doku = _doku;
         treasury = _treasury;
@@ -78,9 +91,9 @@ contract Farms is Ownable {
     }
 
     function removeToken(uint256 _index) external onlyOwner {
+        tokenWhitelistMap[tokenWhitelist[_index]] = false;
         tokenWhitelist[_index] = tokenWhitelist[tokenWhitelist.length - 1];
         tokenWhitelist.pop();
-        tokenWhitelistMap[tokenWhitelist[_index]] = false;
     }
 
     function tokenWhitelistLength() external view returns (uint256) {
@@ -93,14 +106,32 @@ contract Farms is Ownable {
 
     // update given token info
     function setToken(IERC20 _token, uint256 _allocPoint) external onlyOwner {
-        require(tokenInWhitelist(_token), "Token must be whitelisted");
+        require(tokenInWhitelist(_token), "Farms::Token must be whitelisted");
 
         totalAllocPoint =
             totalAllocPoint -
-            tokens[_token].allocPoint +
+            tokenInfo[_token].allocPoint +
             _allocPoint;
 
-        tokens[_token].allocPoint = _allocPoint;
+        tokenInfo[_token].allocPoint = _allocPoint;
+    }
+
+    // create custom pool
+    function createPool(
+        IERC20[] calldata _tokens,
+        uint256[] calldata _weights,
+        uint256[] calldata _amounts
+    ) external {
+        require(
+            (_tokens.length == _weights.length) &&
+                (_weights.length == _amounts.length),
+            "Farms::Arrays must be same length"
+        );
+        require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
+
+        bytes32 poolId = router.createPool(_tokens, _weights, _amounts);
+
+        poolIds.push(poolId);
     }
 
     // Update reward variables of the given token to be up-to-date.
@@ -108,53 +139,68 @@ contract Farms is Ownable {
         public
         returns (TokenInfo memory token)
     {
-        require(tokenInWhitelist(_token), "Token must be whitelisted");
-        token = tokens[_token];
-        if (block.number > token.lastRewardBlock) {
-            uint256 tokenSupply = IERC20(_token).balanceOf(address(this));
+        token = tokenInfo[_token];
 
-            if (tokenSupply > 0) {
+        if (block.number > token.lastRewardBlock) {
+            // total amount of such tokens in the contract
+            if (token.amount > 0) {
                 uint256 blocksSinceLastReward = block.number -
                     token.lastRewardBlock;
 
-                uint256 dokuReward = (blocksSinceLastReward *
+                // rewards for this token based on his allocation points
+                uint256 dokuRewards = (blocksSinceLastReward *
                     dokuPerBlock *
                     token.allocPoint) / totalAllocPoint;
 
-                doku.mint(treasury, (dokuReward * treasuryPercent) / 1000);
-                doku.mint(address(this), dokuReward);
+                doku.mint(address(this), dokuRewards);
 
-                token.accDokuPerShare += (dokuReward * 1e12) / token.amount;
+                uint256 treasuryRewards = (dokuRewards * treasuryPercent) /
+                    1000;
+
+                doku.mint(treasury, treasuryRewards);
+
+                token.accDokuPerShare =
+                    token.accDokuPerShare +
+                    ((dokuRewards * ACCOUNT_PRECISION) / token.amount);
             }
-
             token.lastRewardBlock = block.number;
-            tokens[_token] = token;
+            tokenInfo[_token] = token;
         }
     }
 
-    // View function to see pending DOKUs on frontend.
-    function pendingDoku(IERC20 _token, address _user)
+    // View function to see pending DOKU on frontend.
+    function pendingDoku(uint256 _pid, address _user)
         external
         view
-        returns (uint256)
+        returns (uint256 pending)
     {
-        require(tokenInWhitelist(_token), "Token must be whitelisted");
+        UserInfo storage user = userInfo[_pid][_user];
 
-        TokenInfo storage token = tokens[_token];
-        UserInfo storage user = users[_token][_user];
+        for (uint256 i = 0; i < user.tokens.length; ++i) {
+            TokenInfo memory token = tokenInfo[user.tokens[i]];
+            IERC20 token_ = user.tokens[i];
 
-        uint256 accDokuPerShare = token.accDokuPerShare;
-        if (block.number > token.lastRewardBlock && token.amount != 0) {
             uint256 blocksSinceLastReward = block.number -
                 token.lastRewardBlock;
-
-            uint256 dokuReward = (blocksSinceLastReward *
+            // based on the token weight (allocation points) we calculate the doku rewarded for this specific token
+            uint256 dokusRewards = (blocksSinceLastReward *
                 dokuPerBlock *
                 token.allocPoint) / totalAllocPoint;
 
-            accDokuPerShare += (dokuReward * 1e12) / token.amount;
+            // we calculate the new amount of accumulated doku per for token
+            uint256 accDokuPerShare = token.accDokuPerShare;
+
+            // token amount can't be eq 0
+            accDokuPerShare += ((dokusRewards * ACCOUNT_PRECISION) /
+                token.amount);
+
+            // resulting pool reward is sum of tokens rewards
+            pending += (user.amounts[token_] * accDokuPerShare);
         }
-        return (user.amount * accDokuPerShare) / 1e12 - user.rewardDebt;
+        // dont forget to divide back
+        pending /= ACCOUNT_PRECISION;
+        // dont forget to sub users rewardDebt of the pool
+        pending -= user.rewardDebt;
     }
 
     function massUpdateTokens() public {
@@ -165,6 +211,7 @@ contract Farms is Ownable {
     }
 
     // get tokens given lp consist of
+    // todo: delete
     function getLpTokens(IBalancerPool _lpToken)
         public
         view
@@ -175,40 +222,61 @@ contract Farms is Ownable {
         (tokens_, , ) = vault.getPoolTokens(poolId);
     }
 
-    // Deposit tokens to Tsundoku
+    // Deposit tokens to existing pool
     function deposit(
+        uint256 _pid,
         IERC20[] calldata _tokens,
-        uint256[] calldata _weights,
         uint256[] calldata _amounts
     ) public {
         require(
-            (_tokens.length == _weights.length) &&
-                (_weights.length == _amounts.length),
-            "Arrays must be same length"
+            (_tokens.length == _amounts.length),
+            "Farms::Arrays must be same length"
         );
 
-        for (uint256 pid = 0; pid < _tokens.length; ++pid) {
+        require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
+
+        UserInfo storage user = userInfo[_pid][msg.sender];
+
+        for (uint256 i = 0; i < _tokens.length; ++i) {
             require(
-                tokenInWhitelist(_tokens[pid]),
-                "All tokens must be whitelisted"
+                tokenInWhitelist(_tokens[i]),
+                "Farms::All tokens must be whitelisted"
             );
 
-            IERC20 token_ = _tokens[pid];
-            uint256 amount_ = _amounts[pid];
+            IERC20 token_ = _tokens[i];
+            uint256 amount_ = _amounts[i];
 
-            TokenInfo storage token = tokens[token_];
-            UserInfo storage user = users[token_][msg.sender];
+            token_.safeTransferFrom(msg.sender, address(this), amount_);
 
-            user.amount += amount_;
+            TokenInfo storage token = tokenInfo[token_];
+
+            if (user.amounts[token_] == 0) {
+                user.tokens.push(token_);
+            }
+            user.amounts[token_] += amount_;
+
             user.rewardDebt +=
                 (amount_ * token.accDokuPerShare) /
                 ACCOUNT_PRECISION;
 
             token.amount += amount_;
-
-            token_.safeTransferFrom(msg.sender, address(this), amount_);
         }
 
-        router.addLiquidity(_tokens, _weights, _amounts);
+        router.addLiquidity(poolIds[_pid], _tokens, _amounts);
+    }
+
+    function arrayIsSorted(IERC20[] calldata array) public pure returns (bool) {
+        if (array.length < 2) {
+            return true;
+        }
+
+        IERC20 previous = array[0];
+        for (uint256 i = 1; i < array.length; ++i) {
+            IERC20 current = array[i];
+            if (previous >= current) return false;
+            previous = current;
+        }
+
+        return true;
     }
 }
