@@ -24,6 +24,8 @@ struct TokenInfo {
 contract Farms is Ownable {
     // todo: make events
     // todo: test for user token amount != 0
+    // todo: add description to all funcs
+    // todo: consider adding router
 
     using SafeERC20 for IERC20;
 
@@ -85,6 +87,31 @@ contract Farms is Ownable {
         router = _router;
     }
 
+    function arrayIsSorted(IERC20[] calldata array) public pure returns (bool) {
+        if (array.length < 2) {
+            return true;
+        }
+
+        IERC20 previous = array[0];
+        for (uint256 i = 1; i < array.length; ++i) {
+            IERC20 current = array[i];
+            if (previous >= current) return false;
+            previous = current;
+        }
+
+        return true;
+    }
+
+    // Safe DOKU transfer function, just in case if rounding error causes contract to not have enough DOKU
+    function safeDokuTransfer(address _to, uint256 _amount) internal {
+        uint256 dokuBalance = doku.balanceOf(address(this));
+        if (_amount > dokuBalance) {
+            doku.transfer(_to, dokuBalance);
+        } else {
+            doku.transfer(_to, _amount);
+        }
+    }
+
     function addToken(IERC20 _token) external onlyOwner {
         tokenWhitelist.push(_token);
         tokenWhitelistMap[_token] = true;
@@ -135,11 +162,8 @@ contract Farms is Ownable {
     }
 
     // Update reward variables of the given token to be up-to-date.
-    function updateToken(IERC20 _token)
-        public
-        returns (TokenInfo memory token)
-    {
-        token = tokenInfo[_token];
+    function updateToken(IERC20 _token) public {
+        TokenInfo storage token = tokenInfo[_token];
 
         if (block.number > token.lastRewardBlock) {
             // total amount of such tokens in the contract
@@ -159,12 +183,11 @@ contract Farms is Ownable {
 
                 doku.mint(treasury, treasuryRewards);
 
-                token.accDokuPerShare =
-                    token.accDokuPerShare +
-                    ((dokuRewards * ACCOUNT_PRECISION) / token.amount);
+                token.accDokuPerShare +=
+                    (dokuRewards * ACCOUNT_PRECISION) /
+                    token.amount;
             }
             token.lastRewardBlock = block.number;
-            tokenInfo[_token] = token;
         }
     }
 
@@ -226,7 +249,8 @@ contract Farms is Ownable {
     function deposit(
         uint256 _pid,
         IERC20[] calldata _tokens,
-        uint256[] calldata _amounts
+        uint256[] calldata _amounts,
+        address _to
     ) public {
         require(
             (_tokens.length == _amounts.length),
@@ -235,7 +259,7 @@ contract Farms is Ownable {
 
         require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
 
-        UserInfo storage user = userInfo[_pid][msg.sender];
+        UserInfo storage user = userInfo[_pid][_to];
 
         for (uint256 i = 0; i < _tokens.length; ++i) {
             require(
@@ -246,7 +270,7 @@ contract Farms is Ownable {
             IERC20 token_ = _tokens[i];
             uint256 amount_ = _amounts[i];
 
-            token_.safeTransferFrom(msg.sender, address(this), amount_);
+            updateToken(token_);
 
             TokenInfo storage token = tokenInfo[token_];
 
@@ -260,23 +284,102 @@ contract Farms is Ownable {
                 ACCOUNT_PRECISION;
 
             token.amount += amount_;
+
+            token_.safeTransferFrom(msg.sender, address(router), amount_);
         }
 
         router.addLiquidity(poolIds[_pid], _tokens, _amounts);
     }
 
-    function arrayIsSorted(IERC20[] calldata array) public pure returns (bool) {
-        if (array.length < 2) {
-            return true;
-        }
+    function harvest(uint256 _pid, address _to) public {
+        UserInfo storage user = userInfo[_pid][msg.sender];
 
-        IERC20 previous = array[0];
-        for (uint256 i = 1; i < array.length; ++i) {
-            IERC20 current = array[i];
-            if (previous >= current) return false;
-            previous = current;
-        }
+        // this would  be the amount if the user joined right from the start of the farm
+        uint256 accumulatedDoku;
 
-        return true;
+        for (uint256 i = 0; i < user.tokens.length; ++i) {
+            IERC20 token_ = user.tokens[i];
+
+            updateToken(token_);
+
+            TokenInfo memory token = tokenInfo[token_];
+
+            // resulting amount is sum over all tokens
+            accumulatedDoku += user.amounts[token_] * token.accDokuPerShare;
+        }
+        // subtracting the rewards the user is not eligible for
+        uint256 eligibleDoku = (accumulatedDoku / ACCOUNT_PRECISION) -
+            user.rewardDebt;
+
+        // we set the new rewardDebt to the current accumulated amount of rewards
+        user.rewardDebt = accumulatedDoku;
+
+        if (eligibleDoku > 0) {
+            safeDokuTransfer(_to, eligibleDoku);
+        }
+    }
+
+    function harvestAll(uint256[] calldata _pids, address _to) external {
+        for (uint256 i = 0; i < _pids.length; i++) {
+            harvest(_pids[i], _to);
+        }
+    }
+
+    function withdrawAndHarvest(
+        uint256 _pid,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts,
+        address _to
+    ) public {
+        UserInfo storage user = userInfo[_pid][msg.sender];
+        require(
+            (_tokens.length == _amounts.length),
+            "Farms::Arrays must be same length"
+        );
+
+        require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
+
+        uint256 accumulatedBeets;
+        uint256 rewardDebtDecay;
+
+        router.removeLiquidity(poolIds[_pid], _tokens, _amounts);
+
+        for (uint256 i = 0; i < _tokens.length; ++i) {
+            IERC20 token_ = _tokens[i];
+            uint256 amount_ = _amounts[i];
+
+            require(
+                amount_ <= user.amounts[token_],
+                "Farms::Cannot withdraw more than deposited"
+            );
+
+            updateToken(token_);
+
+            TokenInfo storage token = tokenInfo[token_];
+
+            // this would  be the amount if the user joined right from the start of the farm
+            accumulatedBeets += user.amounts[token_] * token.accDokuPerShare;
+
+            rewardDebtDecay += amount_ * token.accDokuPerShare;
+
+            user.amounts[token_] -= amount_;
+            token.amount -= amount_;
+
+            token_.safeTransfer(_to, amount_);
+        }
+        uint256 eligibleBeets = (accumulatedBeets / ACCOUNT_PRECISION) -
+            user.rewardDebt;
+
+        /*
+        after harvest & withdraw, he should be eligible for exactly 0 tokens
+        => userInfo.amount * pool.accBeetsPerShare / ACC_BEETS_PRECISION == userInfo.rewardDebt
+        since we are removing some LP's from userInfo.amount, we also have to remove
+        the equivalent amount of reward debt
+        */
+        user.rewardDebt =
+            accumulatedBeets -
+            (rewardDebtDecay / ACCOUNT_PRECISION);
+
+        safeDokuTransfer(_to, eligibleBeets);
     }
 }

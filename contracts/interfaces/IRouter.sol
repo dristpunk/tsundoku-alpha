@@ -15,4 +15,10 @@ interface IRouter {
         uint256[] calldata _weights,
         uint256[] calldata _amounts
     ) external returns (bytes32);
+
+    function removeLiquidity(
+        bytes32 _poolId,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts
+    ) external returns (bytes32);
 }

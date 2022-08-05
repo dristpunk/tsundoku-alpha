@@ -25,21 +25,35 @@ interface IBalancerVault {
         bool fromInternalBalance;
     }
 
+    struct ExitPoolRequest {
+        IERC20[] assets;
+        uint256[] minAmountsOut;
+        bytes userData;
+        bool toInternalBalance;
+    }
+
     function registerPool() external returns (bytes32 poolId);
 
     function joinPool(
         bytes32 poolId,
         address sender,
         address recipient,
-        JoinPoolRequest memory request
-    ) external payable;
+        JoinPoolRequest calldata request
+    ) external;
+
+    function exitPool(
+        bytes32 poolId,
+        address sender,
+        address recipient,
+        ExitPoolRequest calldata request
+    ) external;
 
     function getPoolTokens(bytes32 poolId)
         external
         view
         returns (
-            IERC20[] memory tokens,
-            uint256[] memory balances,
+            IERC20[] calldata tokens,
+            uint256[] calldata balances,
             uint256 lastChangeBlock
         );
 }

@@ -20,6 +20,8 @@ contract Router is Ownable {
     IBalancerVault public vault; // balancer vault
     uint256 public swapFeePercentage; // 18 decimals
 
+    address public farms; // farms contract
+
     enum JoinKind {
         INIT,
         EXACT_TOKENS_IN_FOR_BPT_OUT,
@@ -36,10 +38,12 @@ contract Router is Ownable {
 
     constructor(
         // todo: fix access trouble
+        address _farms,
         IWeightedPoolFactory _poolFactory,
         IBalancerVault _vault,
         uint256 _swapFeePercentage
     ) {
+        farms = _farms;
         poolFactory = _poolFactory;
         swapFeePercentage = _swapFeePercentage;
         vault = _vault;
@@ -141,7 +145,7 @@ contract Router is Ownable {
         bytes32 _poolId,
         IERC20[] calldata _tokens,
         uint256[] calldata _amounts,
-        IBalancerVault.JoinKind joinType
+        IBalancerVault.JoinKind joinKind
     ) internal {
         for (uint256 i = 0; i < _tokens.length; i++) {
             IERC20(_tokens[i]).approve(address(vault), _amounts[i]);
@@ -152,17 +156,51 @@ contract Router is Ownable {
         joinRequest.assets = _tokens;
         joinRequest.maxAmountsIn = _amounts;
         joinRequest.fromInternalBalance = false;
-        if (joinType == IBalancerVault.JoinKind.INIT) {
+        if (joinKind == IBalancerVault.JoinKind.INIT) {
             joinRequest.userData = abi.encode(JoinKind.INIT, _amounts);
         } else {
             joinRequest.userData = abi.encode(
                 JoinKind.EXACT_TOKENS_IN_FOR_BPT_OUT,
                 _amounts,
-                0 // todo: change minimum bpt
+                0 // todo: change minimum bpt https://dev.balancer.fi/resources/query-batchswap-join-exit#queryexit
             );
         }
 
         // Tokens are pulled from sender (Or could be an approved relayer)
         vault.joinPool(_poolId, address(this), address(this), joinRequest);
+    }
+
+    function removeLiquidity(
+        bytes32 _poolId,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts
+    ) external {
+        _removeLiquidityFromPool(
+            _poolId,
+            _tokens,
+            _amounts,
+            IBalancerVault.ExitKind.BPT_IN_FOR_EXACT_TOKENS_OUT
+        );
+    }
+
+    function _removeLiquidityFromPool(
+        bytes32 _poolId,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts,
+        IBalancerVault.ExitKind exitKind
+    ) internal {
+        // Put together a JoinPoolRequest type
+        IBalancerVault.ExitPoolRequest memory exitRequest;
+        exitRequest.assets = _tokens;
+        exitRequest.minAmountsOut = _amounts;
+        exitRequest.toInternalBalance = false;
+
+        exitRequest.userData = abi.encode(
+            exitKind,
+            _amounts,
+            2**256 - 1 // todo: change maximum bpt https://dev.balancer.fi/resources/query-batchswap-join-exit#queryexit
+        );
+
+        vault.exitPool(_poolId, address(this), address(farms), exitRequest);
     }
 }
