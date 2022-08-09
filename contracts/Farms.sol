@@ -25,7 +25,8 @@ contract Farms is Ownable {
     // todo: make events
     // todo: test for user token amount != 0
     // todo: add description to all funcs
-    // todo: consider adding router
+    // todo: consider adding rewarder
+    // todo: deal with startBlock
 
     using SafeERC20 for IERC20;
 
