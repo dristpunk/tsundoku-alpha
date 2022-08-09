@@ -147,7 +147,8 @@ contract Farms is Ownable {
     function createPool(
         IERC20[] calldata _tokens,
         uint256[] calldata _weights,
-        uint256[] calldata _amounts
+        uint256[] calldata _amounts,
+        address _to
     ) external {
         require(
             (_tokens.length == _weights.length) &&
@@ -155,6 +156,35 @@ contract Farms is Ownable {
             "Farms::Arrays must be same length"
         );
         require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
+
+        UserInfo storage user = userInfo[poolIds.length][_to];
+
+        for (uint256 i = 0; i < _tokens.length; ++i) {
+            require(
+                tokenInWhitelist(_tokens[i]),
+                "Farms::All tokens must be whitelisted"
+            );
+
+            IERC20 token_ = _tokens[i];
+            uint256 amount_ = _amounts[i];
+
+            updateToken(token_);
+
+            TokenInfo storage token = tokenInfo[token_];
+
+            if (user.amounts[token_] == 0) {
+                user.tokens.push(token_);
+            }
+            user.amounts[token_] += amount_;
+
+            user.rewardDebt +=
+                (amount_ * token.accDokuPerShare) /
+                ACCOUNT_PRECISION;
+
+            token.amount += amount_;
+
+            token_.safeTransferFrom(msg.sender, address(router), amount_);
+        }
 
         bytes32 poolId = router.createPool(_tokens, _weights, _amounts);
 
