@@ -157,34 +157,9 @@ contract Farms is Ownable {
         );
         require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
 
-        UserInfo storage user = userInfo[poolIds.length][_to];
+        uint256 newPid = poolIds.length;
 
-        for (uint256 i = 0; i < _tokens.length; ++i) {
-            require(
-                tokenInWhitelist(_tokens[i]),
-                "Farms::All tokens must be whitelisted"
-            );
-
-            IERC20 token_ = _tokens[i];
-            uint256 amount_ = _amounts[i];
-
-            updateToken(token_);
-
-            TokenInfo storage token = tokenInfo[token_];
-
-            if (user.amounts[token_] == 0) {
-                user.tokens.push(token_);
-            }
-            user.amounts[token_] += amount_;
-
-            user.rewardDebt +=
-                (amount_ * token.accDokuPerShare) /
-                ACCOUNT_PRECISION;
-
-            token.amount += amount_;
-
-            token_.safeTransferFrom(msg.sender, address(router), amount_);
-        }
+        _deposit(newPid, _tokens, _amounts, _to);
 
         bytes32 poolId = router.createPool(_tokens, _weights, _amounts);
 
@@ -275,20 +250,12 @@ contract Farms is Ownable {
         (tokens_, , ) = vault.getPoolTokens(poolId);
     }
 
-    // Deposit tokens to existing pool
-    function deposit(
+    function _deposit(
         uint256 _pid,
         IERC20[] calldata _tokens,
         uint256[] calldata _amounts,
         address _to
-    ) public {
-        require(
-            (_tokens.length == _amounts.length),
-            "Farms::Arrays must be same length"
-        );
-
-        require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
-
+    ) internal {
         UserInfo storage user = userInfo[_pid][_to];
 
         for (uint256 i = 0; i < _tokens.length; ++i) {
@@ -317,6 +284,22 @@ contract Farms is Ownable {
 
             token_.safeTransferFrom(msg.sender, address(router), amount_);
         }
+    }
+
+    // Deposit tokens to existing pool
+    function deposit(
+        uint256 _pid,
+        IERC20[] calldata _tokens,
+        uint256[] calldata _amounts,
+        address _to
+    ) public {
+        require(
+            (_tokens.length == _amounts.length),
+            "Farms::Arrays must be same length"
+        );
+        require(arrayIsSorted(_tokens), "Farms::Array must be sorted");
+
+        _deposit(_pid, _tokens, _amounts, _to);
 
         router.addLiquidity(poolIds[_pid], _tokens, _amounts);
     }
