@@ -27,6 +27,7 @@ contract Farms is Ownable {
     // todo: add description to all funcs
     // todo: consider adding rewarder
     // todo: deal with startBlock
+    // todo: add changer of dokuPerBlock and treasury
 
     using SafeERC20 for IERC20;
 
